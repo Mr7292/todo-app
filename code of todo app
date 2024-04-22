@@ -1,0 +1,258 @@
+import 'package:flutter/material.dart';
+import 'package:path/path.dart';
+import 'package:sqflite/sqflite.dart';
+
+void main() {
+  runApp(TodoApp());
+}
+
+class Todo {
+  int? id; // Nullable ID
+  final String title;
+  final String description;
+  final String priority;
+  final bool isCompleted;
+
+  Todo({
+    this.id, // Make id optional
+    required this.title,
+    required this.description,
+    required this.priority,
+    required this.isCompleted,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      if (id != null) 'id': id,
+      'title': title,
+      'description': description,
+      'priority': priority,
+      'is_completed': isCompleted ? 1 : 0,
+    };
+  }
+}
+
+
+class DatabaseHelper {
+  late Database _database;
+
+  Future<void> initDatabase() async {
+    _database = await openDatabase(
+      join(await getDatabasesPath(), 'todo_database.db'),
+      onCreate: (db, version) {
+        return db.execute(
+          "CREATE TABLE todos(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, priority TEXT, is_completed INTEGER)",
+        );
+      },
+      version: 1,
+    );
+  }
+
+  Future<void> insertTodo(Todo todo) async {
+    await _database.insert(
+      'todos',
+      todo.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<List<Todo>> retrieveTodos() async {
+    final List<Map<String, dynamic>> maps = await _database.query('todos');
+
+    return List.generate(maps.length, (i) {
+      return Todo(
+        id: maps[i]['id'],
+        title: maps[i]['title'],
+        description: maps[i]['description'],
+        priority: maps[i]['priority'],
+        isCompleted: maps[i]['is_completed'] == 1,
+      );
+    });
+  }
+
+  Future<void> updateTodoCompletion(int id, bool isCompleted) async {
+    await _database.update(
+      'todos',
+      {'is_completed': isCompleted ? 1 : 0},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+}
+
+class TodoApp extends StatelessWidget {
+  final DatabaseHelper databaseHelper = DatabaseHelper();
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        appBar: AppBar(
+          title: const Text('Todo App'),
+        ),
+        body: TodoList(databaseHelper: databaseHelper),
+        floatingActionButton: FloatingActionButton(
+          onPressed: () => _showAddTodoDialog(context),
+          child: const Icon(Icons.add),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showAddTodoDialog(BuildContext context) async {
+    TextEditingController titleController = TextEditingController();
+    TextEditingController descriptionController = TextEditingController();
+    String? priority;
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title:  const Text('Add New Todo'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: titleController,
+                decoration: const InputDecoration(labelText: 'Title'),
+              ),
+              TextField(
+                controller: descriptionController,
+                decoration: const InputDecoration(labelText: 'Description'),
+              ),
+              DropdownButtonFormField<String>(
+                value: priority,
+                onChanged: (String? value) {
+                  priority = value;
+                },
+                items: ['High', 'Medium', 'Low']
+                    .map((String priority) {
+                  return DropdownMenuItem<String>(
+                    value: priority,
+                    child: Text(priority),
+                  );
+                })
+                    .toList(),
+                decoration: const InputDecoration(
+                  labelText: 'Priority',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                if (titleController.text.isNotEmpty &&
+                    descriptionController.text.isNotEmpty &&
+                    priority != null) {
+                  Todo newTodo = Todo(
+                    title: titleController.text,
+                    description: descriptionController.text,
+                    priority: priority!,
+                    isCompleted: true,
+
+                  );
+
+                  await databaseHelper.insertTodo(newTodo);
+
+                  Navigator.of(context).pop();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Todo added')),
+                  );
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Please fill all fields')),
+                  );
+                }
+              },
+              child: const Text('Add'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class TodoList extends StatefulWidget {
+  final DatabaseHelper databaseHelper;
+
+  TodoList({required this.databaseHelper});
+
+  @override
+  _TodoListState createState() => _TodoListState();
+}
+
+class _TodoListState extends State<TodoList> {
+  late Future<List<Todo>> _todos;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.databaseHelper.initDatabase();
+    _todos = widget.databaseHelper.retrieveTodos();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<Todo>>(
+      future: _todos,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return const Center(child: Text('No todos found'));
+        }
+
+        return ListView.builder(
+          itemCount: snapshot.data!.length,
+          itemBuilder: (context, index) {
+            return Dismissible(
+              key: Key(snapshot.data![index].id.toString()),
+              onDismissed: (direction) {
+                setState(() {
+                  snapshot.data!.removeAt(index);
+                });
+              },
+              background: Container(color: Colors.red),
+              child: ListTile(
+                title: Text(snapshot.data![index].title),
+                subtitle: Text(snapshot.data![index].description),
+                leading: _buildPriorityIcon(snapshot.data![index].priority),
+                trailing: Checkbox(
+                  value: snapshot.data![index].isCompleted,
+                  onChanged: (bool? value) {
+                    setState(() {
+                      widget.databaseHelper.updateTodoCompletion(
+                          snapshot.data![index].id!, value!);
+                    });
+                  },
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Icon _buildPriorityIcon(String priority) {
+    Color color = Colors.green;
+    if (priority.toLowerCase() == 'high') {
+      color = Colors.red;
+    } else if (priority.toLowerCase() == 'medium') {
+      color = Colors.blue;
+    }
+    return Icon(Icons.error_outline, color: color);
+  }
+}
